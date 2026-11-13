@@ -1,2 +1,10 @@
-   FROM nginx:alpine
-   COPY default.conf.template /etc/nginx/templates/default.conf.template
+server {
+  listen 80;
+  location /health {
+    return ${HEALTH_CODE} "ok\n";
+  }
+  location / {
+    default_type text/html;
+    return 200 "<body style='background:${COLOR};color:white;font-family:sans-serif;text-align:center'><h1>Version ${VERSION}</h1><h2>${COLOR} environment</h2></body>\n";
+  }
+}
