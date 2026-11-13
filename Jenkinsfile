@@ -40,7 +40,7 @@ pipeline {
                 '''
             }
         }
-
+        
         stage('Smoke test') {
             steps {
                 sh '''
@@ -63,3 +63,61 @@ pipeline {
                 script { env.SWITCHED = 'true' }
                 sh '''
                     mkdir -p $BASE/conf
+                    echo "server { listen 80; location / { proxy_pass http://bg-$NEW:80; } }" > $BASE/conf/active.conf
+                    if docker ps -q -f name=bg-router | grep -q .; then
+                      docker exec bg-router nginx -t
+                      docker exec bg-router nginx -s reload
+                    else
+                      docker rm -f bg-router 2>/dev/null || true
+                      docker run -d --name bg-router --network $NET -p 8081:80 -v $BASE/conf:/etc/nginx/conf.d:ro nginx:alpine
+                    fi
+                    echo $NEW > $BASE/active_color
+                '''
+            }
+        }
+
+        stage('Verify live traffic') {
+            steps {
+                sh '''
+                    sleep 2
+                    docker exec bg-router wget -q -O- http://127.0.0.1/health
+                    docker exec bg-router wget -q -O- http://127.0.0.1/ | grep "Version $APP_VERSION"
+                '''
+                script {
+                    if (params.FAIL_AFTER_SWITCH) {
+                        error('Simulated failure after switching traffic')
+                    }
+                }
+            }
+        }
+            }
+
+    post {
+        success {
+            slackSend(channel: '#jenkins-alerts', color: 'good',
+                message: "SUCCESS: v${params.APP_VERSION} is live on ${env.NEW} (${env.JOB_NAME} #${env.BUILD_NUMBER})")
+        }
+        failure {
+            script {
+                stage('Rollback') {
+                    sh '''
+                        if [ "$SWITCHED" = "true" ] && [ "$ACTIVE" != "none" ]; then
+                          echo "Rolling traffic back to $ACTIVE"
+                          echo "server { listen 80; location / { proxy_pass http://bg-$ACTIVE:80; } }" > $BASE/conf/active.conf
+                          docker exec bg-router nginx -s reload
+                          echo $ACTIVE > $BASE/active_color
+                          docker rm -f bg-$NEW 2>/dev/null || true
+                        elif [ "$SWITCHED" = "true" ]; then
+                          echo "First deployment failed after the switch, so there is no earlier version to roll back to"
+                        else
+                          echo "Traffic was never switched, removing the failed bg-$NEW"
+                          docker rm -f bg-$NEW 2>/dev/null || true
+                        fi
+                    '''
+                }
+            }
+            slackSend(channel: '#jenkins-alerts', color: 'danger',
+                message: "FAILED and rolled back: ${env.JOB_NAME} #${env.BUILD_NUMBER}, live version unchanged\n${env.BUILD_URL}")
+        }
+    }
+}
